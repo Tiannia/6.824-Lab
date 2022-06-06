@@ -6,21 +6,16 @@ package main
 // go run mrsequential.go wc.so pg*.txt
 //
 
-import "fmt"
-import "6.824/mr"
-import "plugin"
-import "os"
-import "log"
-import "io/ioutil"
-import "sort"
+import (
+	"fmt"
+	"io/ioutil"
+	"log"
+	"os"
+	"plugin"
+	"sort"
 
-// for sorting by key.
-type ByKey []mr.KeyValue
-
-// for sorting by key.
-func (a ByKey) Len() int           { return len(a) }
-func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+	"6.824/mr"
+)
 
 func main() {
 	if len(os.Args) < 3 {
@@ -56,7 +51,7 @@ func main() {
 	// rather than being partitioned into NxM buckets.
 	//
 
-	sort.Sort(ByKey(intermediate))
+	sort.Sort(mr.ByKey(intermediate))
 
 	oname := "mr-out-0"
 	ofile, _ := os.Create(oname)
