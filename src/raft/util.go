@@ -9,8 +9,6 @@ import (
 // Debugging
 const Debug = false
 
-//const Debug = true
-
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		log.Printf(format, a...)
@@ -51,7 +49,7 @@ func (rf *Raft) restoreLogTerm(curIndex int) int {
 	if curIndex-rf.lastIncludeIndex == 0 {
 		return rf.lastIncludeTerm
 	}
-	//fmt.Printf("[GET] curIndex:%v,rf.lastIncludeIndex:%v\n", curIndex, rf.lastIncludeIndex)
+	DPrintf("[GET] curIndex:%v,rf.lastIncludeIndex:%v\n", curIndex, rf.lastIncludeIndex)
 	return rf.logs[curIndex-rf.lastIncludeIndex].Term
 }
 
@@ -60,7 +58,7 @@ func (rf *Raft) getLastIndex() int {
 	return len(rf.logs) - 1 + rf.lastIncludeIndex
 }
 
-// 获取最后的任期(快照版本
+// 获取最后的任期(快照版本)
 func (rf *Raft) getLastTerm() int {
 	// 因为初始有填充一个，否则最直接len == 0
 	if len(rf.logs)-1 == 0 {
@@ -73,10 +71,6 @@ func (rf *Raft) getLastTerm() int {
 // 通过快照偏移还原真实PrevLogInfo
 func (rf *Raft) getPrevLogInfo(server int) (int, int) {
 	newEntryBeginIndex := rf.nextIndex[server] - 1
-	lastIndex := rf.getLastIndex()
-	if newEntryBeginIndex == lastIndex+1 {
-		newEntryBeginIndex = lastIndex
-	}
 	return newEntryBeginIndex, rf.restoreLogTerm(newEntryBeginIndex)
 }
 

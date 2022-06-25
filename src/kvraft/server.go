@@ -1,12 +1,16 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
+	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
 const Debug = false
@@ -18,32 +22,179 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	TIMEOUT = 100
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	SeqId     int
+	Key       string
+	Value     string
+	ClientId  int64
+	ServerSeq int64
+	OpType    string
+}
+
+type OpResult struct {
+	Error Err
+	Value string
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
+	mu        sync.Mutex
+	me        int
+	rf        *raft.Raft
+	applyCh   chan raft.ApplyMsg
+	dead      int32 // set by Kill()
+	persister *raft.Persister
 
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	seqMap    map[int64]int           // clientId -> seqId
+	resMap    map[int64]OpResult      // seqId -> OpResult
+	waitChMap map[int64]chan OpResult // ServerSeq -> chan(OpResult)
+	kvPersist map[string]string       // key -> value
+
+	lastIncludeIndex int // raft snapshot
 }
 
+func (kv *KVServer) SerilizeState() []byte {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvPersist)
+	e.Encode(kv.seqMap)
+	e.Encode(kv.resMap)
+	data := w.Bytes()
+	return data
+}
+
+func (kv *KVServer) DeSerilizeState(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	var kvPersist map[string]string
+	var seqMap map[int64]int
+	var resMap map[int64]OpResult
+
+	if d.Decode(&kvPersist) != nil ||
+		d.Decode(&seqMap) != nil ||
+		d.Decode(&resMap) != nil {
+		fmt.Printf("[Server(%v)] Failed to deserilize snapshot!", kv.me)
+	} else {
+		kv.kvPersist = kvPersist
+		kv.seqMap = seqMap
+		kv.resMap = resMap
+	}
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	lastSeq, ok := kv.seqMap[args.ClientId]
+	if ok {
+		if lastSeq == args.SeqId {
+			reply.Err = kv.resMap[args.ClientId].Error
+			reply.Value = kv.resMap[args.ClientId].Value
+			kv.mu.Unlock()
+			return
+		} else if lastSeq > args.SeqId {
+			// Return immediately if recieve an out of date request.
+			kv.mu.Unlock()
+			return
+		}
+	}
+	kv.mu.Unlock()
+
+	op := Op{
+		OpType:    "Get",
+		Key:       args.Key,
+		SeqId:     args.SeqId,
+		ClientId:  args.ClientId,
+		ServerSeq: nrand(),
+	}
+
+	if _, _, ok := kv.rf.Start(op); !ok {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	ch := kv.getWaitCh(op.ServerSeq)
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.waitChMap, op.ServerSeq)
+		kv.mu.Unlock()
+	}()
+
+	timer := time.After(TIMEOUT * time.Millisecond)
+
+	select {
+	case res := <-ch:
+		reply.Err = res.Error
+		reply.Value = res.Value
+		DPrintf("Get-> select getreply:%v", reply.Err)
+	case <-timer:
+		reply.Err = ErrTimeOut
+		DPrintf("Get-> select getreply:%v", reply.Err)
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	lastSeq, ok := kv.seqMap[args.ClientId]
+	if ok {
+		if lastSeq == args.SeqId {
+			reply.Err = kv.resMap[args.ClientId].Error
+			kv.mu.Unlock()
+			return
+		} else if lastSeq > args.SeqId {
+			// Return immediately if recieve an out of date request.
+			kv.mu.Unlock()
+			return
+		}
+	}
+	kv.mu.Unlock()
+
+	op := Op{
+		OpType:    args.Op,
+		Key:       args.Key,
+		Value:     args.Value,
+		SeqId:     args.SeqId,
+		ClientId:  args.ClientId,
+		ServerSeq: nrand(),
+	}
+	if _, _, ok := kv.rf.Start(op); !ok {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	ch := kv.getWaitCh(op.ServerSeq)
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.waitChMap, op.ServerSeq)
+		kv.mu.Unlock()
+	}()
+
+	timer := time.After(TIMEOUT * time.Millisecond)
+
+	select {
+	case res := <-ch:
+		reply.Err = res.Error
+		DPrintf("PutAppend-> select getreply:%v", reply.Err)
+	case <-timer:
+		reply.Err = ErrTimeOut
+		DPrintf("PutAppend-> select getreply:%v", reply.Err)
+	}
 }
 
 //
@@ -96,6 +247,102 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.seqMap = make(map[int64]int)
+	kv.resMap = make(map[int64]OpResult)
+	kv.kvPersist = make(map[string]string)
+	kv.waitChMap = make(map[int64]chan OpResult)
+	kv.persister = persister
+
+	snapshot := persister.ReadSnapshot()
+	kv.DeSerilizeState(snapshot)
+
+	go kv.applyMsgHandlerLoop()
 
 	return kv
+}
+
+func (kv *KVServer) applyMsgHandlerLoop() {
+	for command := range kv.applyCh {
+		if command.CommandValid {
+
+			// commandIndex is lower than lastIncludeIndex (in the snapshot)
+			if command.CommandIndex <= kv.lastIncludeIndex {
+				return
+			}
+
+			op := command.Command.(Op)
+			res := OpResult{}
+			if kv.isDuplicated(op.ClientId, op.SeqId) {
+				kv.getWaitCh(op.ServerSeq) <- res
+				continue
+			}
+			kv.mu.Lock()
+			switch op.OpType {
+			case "Get":
+				val, ok := kv.kvPersist[op.Key]
+				if ok {
+					res.Value = val
+					res.Error = OK
+				} else {
+					res.Error = ErrNoKey
+				}
+			case "Put":
+				kv.kvPersist[op.Key] = op.Value
+				res.Error = OK
+			case "Append":
+				oriVal, ok := kv.kvPersist[op.Key]
+				if ok {
+					kv.kvPersist[op.Key] = oriVal + op.Value
+				} else {
+					kv.kvPersist[op.Key] = op.Value
+				}
+				res.Error = OK
+			}
+			DPrintf("applyMsgHandlerLoop -> op.OpType:%v", op.OpType)
+			kv.seqMap[op.ClientId] = op.SeqId
+			kv.resMap[op.ClientId] = res
+			kv.mu.Unlock()
+
+			// if need snapshot and raftstatesize() larger than maxraftstate
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
+				snapshot := kv.SerilizeState()
+				kv.rf.Snapshot(command.CommandIndex, snapshot)
+			}
+
+			kv.getWaitCh(op.ServerSeq) <- res
+		}
+
+		if command.SnapshotValid {
+			kv.mu.Lock()
+			// A service wants to switch to snapshot. symbolically call this api to check if there is a conflict.
+			if kv.rf.CondInstallSnapshot(command.SnapshotTerm, command.SnapshotIndex, command.Snapshot) {
+				kv.DeSerilizeState(command.Snapshot)
+				kv.lastIncludeIndex = command.SnapshotIndex
+			}
+			kv.mu.Unlock()
+		}
+	}
+}
+
+func (kv *KVServer) isDuplicated(clientId int64, seqId int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	lastSeqId, exist := kv.seqMap[clientId]
+	if !exist {
+		return false
+	}
+	return seqId <= lastSeqId
+}
+
+func (kv *KVServer) getWaitCh(serverSeq int64) chan OpResult {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	ch, exist := kv.waitChMap[serverSeq]
+	if !exist {
+		kv.waitChMap[serverSeq] = make(chan OpResult, 1)
+		ch = kv.waitChMap[serverSeq]
+	}
+	return ch
 }
