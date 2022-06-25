@@ -242,9 +242,8 @@ func (rf *Raft) electionTicker() {
 		// 时间过期发起选举
 		time.Sleep(time.Duration(generateOverTime(int64(rf.me))) * time.Millisecond)
 		// 此处的流程为每次每次votedTimer如果小于在sleep睡眠之前定义的时间，就代表没有votedTimer被更新为最新的时间，则发起选举
+		rf.mu.Lock()
 		if rf.votedTimer.Before(nowTime) && rf.status != Leader {
-			rf.mu.Lock()
-
 			// 转变状态为候选者
 			rf.status = Candidate
 			rf.votedFor = rf.me
@@ -254,9 +253,8 @@ func (rf *Raft) electionTicker() {
 
 			rf.sendElection()
 			rf.votedTimer = time.Now()
-
-			rf.mu.Unlock()
 		}
+		rf.mu.Unlock()
 	}
 }
 
@@ -463,7 +461,7 @@ func (rf *Raft) leaderAppendEntries() {
 			go func(server int, args AppendEntriesArgs) {
 
 				reply := AppendEntriesReply{}
-				DPrintf("[TIKER-SendHeart-Rf(%v)-To(%v)] args:%+v, curStatus%v\n", rf.me, server, args, rf.status)
+				// DPrintf("[TIKER-SendHeart-Rf(%v)-To(%v)] args:%+v, curStatus%v\n", rf.me, server, args, rf.status)
 				res := rf.sendAppendEntries(server, &args, &reply)
 
 				if res {
