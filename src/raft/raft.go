@@ -721,6 +721,23 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.logs = tempLog
 	if index > rf.commitIndex {
 		rf.commitIndex = index
+	} else {
+		// recommit lastIncludeIndex ~ commitIndex
+		if index < rf.commitIndex {
+			DPrintf("S%d, recommit lastIncludeIndex ~ commitIndex --- lastIncludeIndex:%d, commitIndex:%d\n", rf.me, rf.lastIncludeIndex, rf.commitIndex)
+			rf.lastApplied = index
+			for rf.lastApplied < rf.commitIndex {
+				rf.lastApplied++
+				rf.commitQueue = append(rf.commitQueue, ApplyMsg{
+					CommandValid: true,
+					CommandIndex: rf.lastApplied,
+					Command:      rf.restoreLog(rf.lastApplied).Command,
+				})
+			}
+		}
+	}
+
+	if index > rf.lastApplied {
 		rf.lastApplied = index
 	}
 
@@ -774,6 +791,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	if index > rf.commitIndex {
 		rf.commitIndex = index
+	}
+
+	if index > rf.lastApplied {
 		rf.lastApplied = index
 	}
 
