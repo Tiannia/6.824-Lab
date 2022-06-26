@@ -91,9 +91,11 @@ func (kv *KVServer) DeSerilizeState(snapshot []byte) {
 		d.Decode(&resMap) != nil {
 		fmt.Printf("[Server(%v)] Failed to deserilize snapshot!", kv.me)
 	} else {
+		kv.mu.Lock()
 		kv.kvPersist = kvPersist
 		kv.seqMap = seqMap
 		kv.resMap = resMap
+		kv.mu.Unlock()
 	}
 }
 
@@ -271,12 +273,12 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 			}
 
 			op := command.Command.(Op)
-			res := OpResult{}
-			if kv.isDuplicated(op.ClientId, op.SeqId) {
+
+			isduplicated, res := kv.isDuplicated(op.ClientId, op.SeqId)
+			if isduplicated {
 				kv.getWaitCh(op.ServerSeq) <- res
 				continue
 			}
-			kv.mu.Lock()
 			switch op.OpType {
 			case "Get":
 				val, ok := kv.kvPersist[op.Key]
@@ -299,6 +301,8 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 				res.Error = OK
 			}
 			DPrintf("applyMsgHandlerLoop -> op.OpType:%v", op.OpType)
+
+			kv.mu.Lock()
 			kv.seqMap[op.ClientId] = op.SeqId
 			kv.resMap[op.ClientId] = res
 			kv.mu.Unlock()
@@ -313,26 +317,26 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 		}
 
 		if command.SnapshotValid {
-			kv.mu.Lock()
 			// A service wants to switch to snapshot. symbolically call this api to check if there is a conflict.
 			if kv.rf.CondInstallSnapshot(command.SnapshotTerm, command.SnapshotIndex, command.Snapshot) {
 				kv.DeSerilizeState(command.Snapshot)
 				kv.lastIncludeIndex = command.SnapshotIndex
 			}
-			kv.mu.Unlock()
 		}
 	}
 }
 
-func (kv *KVServer) isDuplicated(clientId int64, seqId int) bool {
+func (kv *KVServer) isDuplicated(clientId int64, seqId int) (bool, OpResult) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
 	lastSeqId, exist := kv.seqMap[clientId]
-	if !exist {
-		return false
+	if exist {
+		if seqId <= lastSeqId {
+			return true, kv.resMap[clientId]
+		}
 	}
-	return seqId <= lastSeqId
+	return false, OpResult{}
 }
 
 func (kv *KVServer) getWaitCh(serverSeq int64) chan OpResult {
