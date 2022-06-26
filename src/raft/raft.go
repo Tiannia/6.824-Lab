@@ -78,8 +78,9 @@ const (
 	MinVoteTime  = 150
 
 	// HeartbeatSleep 心脏休眠时间,要注意的是，这个时间要比选举低，才能建立稳定心跳机制
+	// AppendTimerResolution 每隔一个此时间段就会尝试发送AppendEntries
 	HeartbeatSleep        = 120
-	AppendTimerResolution = 15
+	AppendTimerResolution = 5
 )
 
 type Raft struct {
@@ -283,11 +284,12 @@ func (rf *Raft) committedTicker() {
 		rf.mu.Unlock()
 
 		for _, message := range Messages {
-			if message.CommandValid {
-				DPrintf("S%d[%v] Apply Command. index:%d, cmd:%v\n", rf.me, rf.status, message.CommandIndex, message.Command)
-			} else {
-				DPrintf("S%d[%v] Apply Snapshot. index:%d, term:%d, snapshot:%v\n", rf.me, rf.status, message.SnapshotIndex, message.SnapshotTerm, message.Snapshot)
-			}
+			// // For Debug:
+			// if message.CommandValid {
+			// 	DPrintf("S%d[%v] Apply Command. index:%d, cmd:%v\n", rf.me, rf.status, message.CommandIndex, message.Command)
+			// } else {
+			// 	DPrintf("S%d[%v] Apply Snapshot. index:%d, term:%d, snapshot:%v\n", rf.me, rf.status, message.SnapshotIndex, message.SnapshotTerm, message.Snapshot)
+			// }
 			rf.applyChan <- message
 		}
 	}
@@ -356,6 +358,8 @@ func (rf *Raft) sendElection() {
 
 						rf.matchIndex = make([]int, len(rf.peers))
 						rf.matchIndex[rf.me] = rf.getLastIndex()
+
+						// 立即向Follower发送心跳包
 						for i := 0; i < len(rf.peers); i++ {
 							if i == rf.me {
 								continue
@@ -461,6 +465,7 @@ func (rf *Raft) leaderAppendEntries() {
 			go func(server int, args AppendEntriesArgs) {
 
 				reply := AppendEntriesReply{}
+
 				// DPrintf("[TIKER-SendHeart-Rf(%v)-To(%v)] args:%+v, curStatus%v\n", rf.me, server, args, rf.status)
 				res := rf.sendAppendEntries(server, &args, &reply)
 
@@ -472,6 +477,7 @@ func (rf *Raft) leaderAppendEntries() {
 						return
 					}
 
+					// 返回的任期更高说明自己可能是处于一个过时的分区，直接恢复为Follower并返回
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.status = Follower
@@ -508,7 +514,7 @@ func (rf *Raft) leaderAppendEntries() {
 						}
 						if ok_idx > rf.commitIndex && rf.restoreLogTerm(ok_idx) == rf.currentTerm {
 							rf.commitIndex = ok_idx
-							for rf.lastApplied < rf.commitIndex {
+							for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.getLastIndex() {
 								rf.lastApplied++
 								rf.commitQueue = append(rf.commitQueue, ApplyMsg{
 									CommandValid: true,
@@ -522,7 +528,7 @@ func (rf *Raft) leaderAppendEntries() {
 					} else {
 						if reply.ConflictTerm == -1 {
 							rf.nextIndex[server] = reply.UpNextIndex
-						} else {
+						} else { // Case 2: nextIndex = leader's last entry for XTerm
 							findIdx := -1
 							for index := rf.getLastIndex(); index >= rf.lastIncludeIndex; index-- {
 								if rf.restoreLogTerm(index) == reply.ConflictTerm {
@@ -573,7 +579,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.Term = args.Term
 
-		if args.PrevLogIndex > rf.getLastIndex() {
+		if args.PrevLogIndex > rf.getLastIndex() { // Case 3: nextIndex = log length
 			reply.UpNextIndex = rf.getLastIndex()
 			reply.ConflictTerm = -1
 		} else {
@@ -586,9 +592,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					break
 				}
 			}
-			reply.UpNextIndex = findIdx
+			reply.UpNextIndex = findIdx // Case 1: nextIndex = index of first entry with that term
 		}
 	} else {
+		// append leader's log to follower's and apply command to channel.
 		reply.Success = true
 		reply.Term = args.Term
 
@@ -600,7 +607,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		if rf.lastApplied < rf.commitIndex {
-			for rf.lastApplied < rf.commitIndex {
+			for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.getLastIndex() {
 				rf.lastApplied++
 				rf.commitQueue = append(rf.commitQueue, ApplyMsg{
 					CommandValid: true,
@@ -721,10 +728,10 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.commitIndex = index
 	} else {
 		// recommit lastIncludeIndex ~ commitIndex
+		// I dont know why it is serviceable for lab 3B
 		if index < rf.commitIndex {
-			DPrintf("S%d, recommit lastIncludeIndex ~ commitIndex --- lastIncludeIndex:%d, commitIndex:%d\n", rf.me, rf.lastIncludeIndex, rf.commitIndex)
 			rf.lastApplied = index
-			for rf.lastApplied < rf.commitIndex {
+			for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.getLastIndex() {
 				rf.lastApplied++
 				rf.commitQueue = append(rf.commitQueue, ApplyMsg{
 					CommandValid: true,
@@ -735,6 +742,9 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 	}
 
+	// I think lastApplied will lower than commitIndex(contrary to the paper)
+	// So if a failure occurs before the transfer is completed(lastApplied catch commitIndex)
+	// We shall check it alone.
 	if index > rf.lastApplied {
 		rf.lastApplied = index
 	}
@@ -777,14 +787,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 
 	DPrintf("[Snapshot-Rf(%v)]rf.commitIndex:%v, index:%v\n", rf.me, rf.commitIndex, index)
-	// 更新快照下标/任期
-	if index == rf.getLastIndex()+1 {
-		rf.lastIncludeTerm = rf.getLastTerm()
-	} else {
-		rf.lastIncludeTerm = rf.restoreLogTerm(index)
-	}
 
+	// 更新快照下标/任期
 	rf.lastIncludeIndex = index
+	rf.lastIncludeTerm = rf.restoreLogTerm(index)
 	rf.logs = sLogs
 
 	if index > rf.commitIndex {
