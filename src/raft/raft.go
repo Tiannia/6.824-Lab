@@ -694,7 +694,57 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
-	reply.Term = args.Term
+	if rf.lastIncludeIndex >= args.LastIncludeIndex {
+		reply.Term = args.Term
+	} else {
+		reply.Term = args.Term
+		index := args.LastIncludeIndex
+		tempLog := make([]LogEntry, 0)
+		tempLog = append(tempLog, LogEntry{})
+
+		for i := index + 1; i <= rf.getLastIndex(); i++ {
+			tempLog = append(tempLog, rf.restoreLog(i))
+		}
+
+		rf.lastIncludeTerm = args.LastIncludeTerm
+		rf.lastIncludeIndex = args.LastIncludeIndex
+
+		rf.logs = tempLog
+		if index > rf.commitIndex {
+			rf.commitIndex = index
+		} else {
+			// recommit lastIncludeIndex ~ commitIndex
+			// I dont know why it is serviceable for lab 3B
+			if index < rf.commitIndex {
+				rf.lastApplied = index
+				for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.getLastIndex() {
+					rf.lastApplied++
+					rf.commitQueue = append(rf.commitQueue, ApplyMsg{
+						CommandValid: true,
+						CommandIndex: rf.lastApplied,
+						Command:      rf.restoreLog(rf.lastApplied).Command,
+					})
+				}
+			}
+		}
+
+		// I think lastApplied will lower than commitIndex(contrary to the paper)
+		// So if a failure occurs before the transfer is completed(lastApplied catch commitIndex)
+		// We shall check it alone.
+		if index > rf.lastApplied {
+			rf.lastApplied = index
+		}
+
+		rf.persister.SaveStateAndSnapshot(rf.persistData(), args.Data)
+
+		rf.commitQueue = append(rf.commitQueue, ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  rf.lastIncludeTerm,
+			SnapshotIndex: rf.lastIncludeIndex,
+		})
+		rf.cv.Broadcast()
+	}
 
 	if args.Term > rf.currentTerm || rf.status != Follower {
 		rf.status = Follower
@@ -705,58 +755,6 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	rf.votedTimer = time.Now()
-
-	if rf.lastIncludeIndex >= args.LastIncludeIndex {
-		return
-	}
-
-	// 将快照后的logs切割，快照前的直接applied
-	index := args.LastIncludeIndex
-	tempLog := make([]LogEntry, 0)
-	tempLog = append(tempLog, LogEntry{})
-
-	for i := index + 1; i <= rf.getLastIndex(); i++ {
-		tempLog = append(tempLog, rf.restoreLog(i))
-	}
-
-	rf.lastIncludeTerm = args.LastIncludeTerm
-	rf.lastIncludeIndex = args.LastIncludeIndex
-
-	rf.logs = tempLog
-	if index > rf.commitIndex {
-		rf.commitIndex = index
-	} else {
-		// recommit lastIncludeIndex ~ commitIndex
-		// I dont know why it is serviceable for lab 3B
-		if index < rf.commitIndex {
-			rf.lastApplied = index
-			for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.getLastIndex() {
-				rf.lastApplied++
-				rf.commitQueue = append(rf.commitQueue, ApplyMsg{
-					CommandValid: true,
-					CommandIndex: rf.lastApplied,
-					Command:      rf.restoreLog(rf.lastApplied).Command,
-				})
-			}
-		}
-	}
-
-	// I think lastApplied will lower than commitIndex(contrary to the paper)
-	// So if a failure occurs before the transfer is completed(lastApplied catch commitIndex)
-	// We shall check it alone.
-	if index > rf.lastApplied {
-		rf.lastApplied = index
-	}
-
-	rf.persister.SaveStateAndSnapshot(rf.persistData(), args.Data)
-
-	rf.commitQueue = append(rf.commitQueue, ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotTerm:  rf.lastIncludeTerm,
-		SnapshotIndex: rf.lastIncludeIndex,
-	})
-	rf.cv.Broadcast()
 }
 
 // Snapshot the service says it has created a snapshot that has
