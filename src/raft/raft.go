@@ -306,6 +306,7 @@ func (rf *Raft) sendElection() {
 
 		// 开启协程对各个节点发起选举
 		go func(server int) {
+
 			rf.mu.Lock()
 			args := RequestVoteArgs{
 				rf.currentTerm,
@@ -313,8 +314,9 @@ func (rf *Raft) sendElection() {
 				rf.getLastIndex(),
 				rf.getLastTerm(),
 			}
-			reply := RequestVoteReply{}
 			rf.mu.Unlock()
+
+			reply := RequestVoteReply{}
 			res := rf.sendRequestVote(server, &args, &reply)
 
 			if res {
