@@ -304,18 +304,16 @@ func (rf *Raft) sendElection() {
 			continue
 		}
 
+		args := RequestVoteArgs{
+			rf.currentTerm,
+			rf.me,
+			rf.getLastIndex(),
+			rf.getLastTerm(),
+		}
 		// 开启协程对各个节点发起选举
-		go func(server int) {
+		go func(server int, args RequestVoteArgs) {
 
-			rf.mu.Lock()
-			args := RequestVoteArgs{
-				rf.currentTerm,
-				rf.me,
-				rf.getLastIndex(),
-				rf.getLastTerm(),
-			}
-			rf.mu.Unlock()
-
+			// DPrintf("[TIKER-SendElection-Rf(%v)-To(%v)] args:%+v, curStatus%v\n", rf.me, server, args, rf.status)
 			reply := RequestVoteReply{}
 			res := rf.sendRequestVote(server, &args, &reply)
 
@@ -372,7 +370,7 @@ func (rf *Raft) sendElection() {
 				}
 			}
 
-		}(i)
+		}(i, args)
 
 	}
 
@@ -447,28 +445,27 @@ func (rf *Raft) leaderAppendEntries() {
 
 		} else {
 			// 开启协程并发的进行日志增量
-			go func(server int) {
+			prevLogIndex, prevLogTerm := rf.getPrevLogInfo(index)
+			args := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				LeaderCommit: rf.commitIndex,
+			}
 
-				rf.mu.Lock()
-				prevLogIndex, prevLogTerm := rf.getPrevLogInfo(index)
-				args := AppendEntriesArgs{
-					Term:         rf.currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: prevLogIndex,
-					PrevLogTerm:  prevLogTerm,
-					LeaderCommit: rf.commitIndex,
-				}
-				if rf.getLastIndex() >= rf.nextIndex[index] {
-					entries := make([]LogEntry, 0)
-					entries = append(entries, rf.logs[rf.nextIndex[index]-rf.lastIncludeIndex:]...)
-					args.Entries = entries
-				} else {
-					args.Entries = []LogEntry{}
-				}
-				rf.mu.Unlock()
+			if rf.getLastIndex() >= rf.nextIndex[index] {
+				entries := make([]LogEntry, 0)
+				entries = append(entries, rf.logs[rf.nextIndex[index]-rf.lastIncludeIndex:]...)
+				args.Entries = entries
+			} else {
+				args.Entries = []LogEntry{}
+			}
 
-				reply := AppendEntriesReply{}
+			go func(server int, args AppendEntriesArgs) {
+
 				// DPrintf("[TIKER-SendHeart-Rf(%v)-To(%v)] args:%+v, curStatus%v\n", rf.me, server, args, rf.status)
+				reply := AppendEntriesReply{}
 				res := rf.sendAppendEntries(server, &args, &reply)
 
 				if res {
@@ -552,7 +549,7 @@ func (rf *Raft) leaderAppendEntries() {
 						rf.ResetAppendTimer(server, true)
 					}
 				}
-			}(index)
+			}(index, args)
 		}
 
 		rf.ResetAppendTimer(index, false)
