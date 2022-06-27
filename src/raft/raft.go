@@ -447,27 +447,27 @@ func (rf *Raft) leaderAppendEntries() {
 
 		} else {
 			// 开启协程并发的进行日志增量
-			prevLogIndex, prevLogTerm := rf.getPrevLogInfo(index)
-			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				LeaderCommit: rf.commitIndex,
-			}
+			go func(server int) {
 
-			if rf.getLastIndex() >= rf.nextIndex[index] {
-				entries := make([]LogEntry, 0)
-				entries = append(entries, rf.logs[rf.nextIndex[index]-rf.lastIncludeIndex:]...)
-				args.Entries = entries
-			} else {
-				args.Entries = []LogEntry{}
-			}
-
-			go func(server int, args AppendEntriesArgs) {
+				rf.mu.Lock()
+				prevLogIndex, prevLogTerm := rf.getPrevLogInfo(index)
+				args := AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  prevLogTerm,
+					LeaderCommit: rf.commitIndex,
+				}
+				if rf.getLastIndex() >= rf.nextIndex[index] {
+					entries := make([]LogEntry, 0)
+					entries = append(entries, rf.logs[rf.nextIndex[index]-rf.lastIncludeIndex:]...)
+					args.Entries = entries
+				} else {
+					args.Entries = []LogEntry{}
+				}
+				rf.mu.Unlock()
 
 				reply := AppendEntriesReply{}
-
 				// DPrintf("[TIKER-SendHeart-Rf(%v)-To(%v)] args:%+v, curStatus%v\n", rf.me, server, args, rf.status)
 				res := rf.sendAppendEntries(server, &args, &reply)
 
@@ -552,7 +552,7 @@ func (rf *Raft) leaderAppendEntries() {
 						rf.ResetAppendTimer(server, true)
 					}
 				}
-			}(index, args)
+			}(index)
 		}
 
 		rf.ResetAppendTimer(index, false)
