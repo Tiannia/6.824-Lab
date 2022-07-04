@@ -17,18 +17,17 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 // 最小值min
-func min(num int, num1 int) int {
-	if num > num1 {
-		return num1
+func min(a int, b int) int {
+	if a > b {
+		return b
 	} else {
-		return num
+		return a
 	}
 }
 
-// 通过不同的随机种子生成不同的过期时间
-func generateOverTime(server int64) int {
-	rand.Seed(time.Now().Unix() + server)
-	return rand.Intn(MoreVoteTime) + MinVoteTime
+func GetRandomExpireTime(left, right int32) time.Time {
+	t := rand.Int31n(right - left)
+	return time.Now().Add(time.Duration(t+left) * time.Millisecond)
 }
 
 // UpToDate paper中投票RPC的rule2
@@ -38,40 +37,59 @@ func (rf *Raft) UpToDate(index int, term int) bool {
 	return term > lastTerm || (term == lastTerm && index >= lastIndex)
 }
 
-// 通过快照偏移还原真实日志条目
-func (rf *Raft) restoreLog(curIndex int) LogEntry {
-	return rf.logs[curIndex-rf.lastIncludeIndex]
+func (rf *Raft) ChangeToFollower(new_term int, vote_for int) {
+	rf.status = Follower
+	rf.votedFor = vote_for
+	rf.currentTerm = new_term
+	rf.persist()
 }
 
-// 通过快照偏移还原真实日志任期
-func (rf *Raft) restoreLogTerm(curIndex int) int {
-	// 如果当前index与快照一致/日志为空，直接返回快照/快照初始化信息，否则根据快照计算
-	if curIndex-rf.lastIncludeIndex == 0 {
-		return rf.lastIncludeTerm
+func (rf *Raft) ChangeToCandidate() {
+	rf.status = Candidate
+	rf.votedFor = rf.me
+	rf.voteNum = 1
+	rf.currentTerm += 1
+	rf.persist()
+}
+
+func (rf *Raft) changeToLeader() {
+	rf.status = Leader
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = rf.getLastIndex() + 1
+		rf.matchIndex[i] = 0
 	}
-	DPrintf("[GET] curIndex:%v,rf.lastIncludeIndex:%v\n", curIndex, rf.lastIncludeIndex)
-	return rf.logs[curIndex-rf.lastIncludeIndex].Term
 }
 
-// 获取最后的快照日志下标(代表已存储）
-func (rf *Raft) getLastIndex() int {
-	return len(rf.logs) - 1 + rf.lastIncludeIndex
+// get the first dummy log index
+func (rf *Raft) getFirstIndex() int {
+	return rf.logs[0].Index
 }
 
-// 获取最后的任期(快照版本)
+// get the first dummy log term
+func (rf *Raft) getFirstTerm() int {
+	return rf.logs[0].Term
+}
+
+// get the last log term
 func (rf *Raft) getLastTerm() int {
-	// 因为初始有填充一个，否则最直接len == 0
-	if len(rf.logs)-1 == 0 {
-		return rf.lastIncludeTerm
-	} else {
-		return rf.logs[len(rf.logs)-1].Term
-	}
+	return rf.logs[len(rf.logs)-1].Term
 }
 
-// 通过快照偏移还原真实PrevLogInfo
-func (rf *Raft) getPrevLogInfo(server int) (int, int) {
-	newEntryBeginIndex := rf.nextIndex[server] - 1
-	return newEntryBeginIndex, rf.restoreLogTerm(newEntryBeginIndex)
+// get the last log index
+func (rf *Raft) getLastIndex() int {
+	return rf.logs[len(rf.logs)-1].Index
+}
+
+// get the Term of index
+// compute the location in log and return the result
+func (rf *Raft) getTermForIndex(index int) int {
+	return rf.logs[index-rf.getFirstIndex()].Term
+}
+
+// get the command of index
+// compute the location in log and return the result
+func (rf *Raft) getCommand(index int) interface{} {
+	return rf.logs[index-rf.getFirstIndex()].Command
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {

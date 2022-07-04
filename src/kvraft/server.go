@@ -59,19 +59,18 @@ type KVServer struct {
 	waitChMap map[int64]chan OpResult // ServerSeq -> chan(OpResult)
 	kvPersist map[string]string       // key -> value
 
-	lastIncludeIndex int // raft snapshot
+	appliedRaftLogIndex int // For raft snapshot
 }
 
 func (kv *KVServer) SerilizeState() []byte {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
 	e.Encode(kv.kvPersist)
 	e.Encode(kv.seqMap)
 	e.Encode(kv.resMap)
-	data := w.Bytes()
-	return data
+	kv.mu.Unlock()
+	return w.Bytes()
 }
 
 func (kv *KVServer) DeSerilizeState(snapshot []byte) {
@@ -259,18 +258,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.DeSerilizeState(snapshot)
 
 	go kv.applyMsgHandlerLoop()
-
+	go kv.shouldTakeSnapshot()
 	return kv
 }
 
 func (kv *KVServer) applyMsgHandlerLoop() {
 	for command := range kv.applyCh {
 		if command.CommandValid {
-
-			// commandIndex is lower than lastIncludeIndex (in the snapshot)
-			if command.CommandIndex <= kv.lastIncludeIndex {
-				return
-			}
 
 			op := command.Command.(Op)
 
@@ -279,6 +273,8 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 				kv.getWaitCh(op.ServerSeq) <- res
 				continue
 			}
+
+			kv.mu.Lock()
 			switch op.OpType {
 			case "Get":
 				val, ok := kv.kvPersist[op.Key]
@@ -300,25 +296,12 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 				}
 				res.Error = OK
 			}
-			DPrintf("applyMsgHandlerLoop -> op.OpType:%v", op.OpType)
-
-			kv.mu.Lock()
+			DPrintf("applyMsgHandlerLoop -> S%d, OpType:%v, K: %v, V: %v, Err:%v",
+				kv.me, op.OpType, op.Key, op.Value, res.Error)
 			kv.seqMap[op.ClientId] = op.SeqId
 			kv.resMap[op.ClientId] = res
+			kv.appliedRaftLogIndex = command.CommandIndex
 			kv.mu.Unlock()
-
-			// if need snapshot and raftstatesize() larger than maxraftstate
-			//
-			// problem: logs were not trimmed, but when I alter the code `kv.persister.RaftStateSize() > kv.maxraftstate`
-			// to `2 * kv.persister.RaftStateSize() > kv.maxraftstate`, which is slowly to pass the test(FAIL)
-			// And alter it to the following, runs faster than before when testing
-			// So I ignored the problem(logs were not trimmed), because I think maxraftstate is 1000, when raftstatesize=2000
-			// the kv-server will create snapshot, and no more than 8*1000(test requirements).
-			// The original code `kv.persister.RaftStateSize() > kv.maxraftstate` also rarely make this problem occurs.
-			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
-				snapshot := kv.SerilizeState()
-				kv.rf.Snapshot(command.CommandIndex, snapshot)
-			}
 
 			kv.getWaitCh(op.ServerSeq) <- res
 		}
@@ -327,7 +310,6 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 			// A service wants to switch to snapshot. symbolically call this api to check if there is a conflict.
 			if kv.rf.CondInstallSnapshot(command.SnapshotTerm, command.SnapshotIndex, command.Snapshot) {
 				kv.DeSerilizeState(command.Snapshot)
-				kv.lastIncludeIndex = command.SnapshotIndex
 			}
 		}
 	}
@@ -356,4 +338,22 @@ func (kv *KVServer) getWaitCh(serverSeq int64) chan OpResult {
 		ch = kv.waitChMap[serverSeq]
 	}
 	return ch
+}
+
+func (kv *KVServer) shouldTakeSnapshot() bool {
+	// if need snapshot and raftstatesize() larger than maxraftstate
+	for {
+		time.Sleep(2 * time.Microsecond)
+		if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+			kv.takeSnapshot()
+		}
+	}
+}
+
+func (kv *KVServer) takeSnapshot() {
+	snapshot := kv.SerilizeState()
+	kv.mu.Lock()
+	appliedRaftLogIndex := kv.appliedRaftLogIndex
+	kv.mu.Unlock()
+	kv.rf.Snapshot(appliedRaftLogIndex, snapshot)
 }
