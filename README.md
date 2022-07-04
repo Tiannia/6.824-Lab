@@ -1,5 +1,5 @@
-[some tutorials](https://github.com/chaozh/MIT-6.824)
-[Students' Guide to Raft](https://thesquareplanet.com/blog/students-guide-to-raft/)
+1. [Some tutorials](https://github.com/chaozh/MIT-6.824)
+2. [Students' Guide to Raft](https://thesquareplanet.com/blog/students-guide-to-raft/)
 
 lab1 ---- 2022/6/6
 ```
